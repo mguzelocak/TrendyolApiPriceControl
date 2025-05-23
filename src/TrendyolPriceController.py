@@ -6,6 +6,8 @@ from typing import List, Dict
 import pytz
 from dotenv import load_dotenv
 import json
+import pandas as pd
+from pandas import DataFrame
 
 class TrendyolPriceController:
     def __init__(self) -> None:
@@ -120,6 +122,7 @@ class TrendyolPriceController:
             result = response.json()
             print(f"📦 Batch status for {batch_id}:")
             all_success = True
+
             for item in result.get("items", []):
                 barcode = item["requestItem"].get("barcode")
                 status = item["status"]
@@ -134,6 +137,66 @@ class TrendyolPriceController:
             print(response.text)
             return False
         
+    def loadDF(self) -> DataFrame:
+        """Load data from MySQL into a DataFrame"""
+        query = "SELECT * FROM priceTracking"
+        df = pd.read_sql(query, self.conn)
+        return df
+
+    def matchingProducts(self, dfTrendyol: str, dfHepsiburada:str) -> DataFrame: 
+        # Create empty DataFrame with desired columns
+        new_df = pd.DataFrame(columns=["stockID", "HBID", "productName", "price", "stock"])
+        hepsi_matched = set()
+        trend_matched = set()
+
+        for i in range(len(dfTrendyol)):
+            matched = False
+            for j in range(len(dfHepsiburada)):
+                if (
+                    (dfTrendyol.iloc[i, 0] == dfHepsiburada.iloc[j, 0]) or
+                    (dfTrendyol.iloc[i, 0] == dfHepsiburada.iloc[j, 5]) or
+                    (dfTrendyol.iloc[i, 1] == dfHepsiburada.iloc[j, 0]) or
+                    (dfTrendyol.iloc[i, 1] == dfHepsiburada.iloc[j, 5]) or
+                    (dfTrendyol.iloc[i, 2] == dfHepsiburada.iloc[j, 0]) or
+                    (dfTrendyol.iloc[i, 2] == dfHepsiburada.iloc[j, 5])
+                ):
+                    # Save matched indexes
+                    hepsi_matched.add(j)
+                    trend_matched.add(i)
+
+                    # Add Trendyol match
+                    stockID = dfTrendyol.iloc[i, 0]
+                    productName = dfTrendyol.iloc[i, 3]
+                    price = dfTrendyol.iloc[i, 4]
+                    stock = dfTrendyol.iloc[i, 5]
+                    hb = dfHepsiburada.iloc[j, 1]
+                    new_df.loc[len(new_df)] = [stockID, hb, productName, price, stock]
+                    matched = True
+                    break
+
+            if not matched:
+                # Trendyol unmatched
+                stockID = dfTrendyol.iloc[i, 0]
+                productName = dfTrendyol.iloc[i, 3]
+                price = dfTrendyol.iloc[i, 4]
+                stock = dfTrendyol.iloc[i, 5]
+                hb = dfHepsiburada.iloc[j, 1]
+                new_df.loc[len(new_df)] = [stockID, hb, productName, price, stock]
+
+        # Add Hepsiburada entries that were not matched
+        for k in range(len(dfHepsiburada)):
+            if k not in hepsi_matched:
+                stockID = dfHepsiburada.iloc[k, 0]
+                productName = dfHepsiburada.iloc[k, 2]
+                price = dfHepsiburada.iloc[k, 3]
+                stock = dfHepsiburada.iloc[k, 4]
+                hb = dfHepsiburada.iloc[k, 1]
+                new_df.loc[len(new_df)] = [stockID, hb, productName, price, stock]
+        
+        return new_df
+        
+    
+
     def close(self) -> None:
         """Close DB connection cleanly"""
         self.cursor.close()
