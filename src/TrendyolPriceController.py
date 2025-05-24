@@ -10,7 +10,25 @@ import pandas as pd
 from pandas import DataFrame
 
 class TrendyolPriceController:
+    """
+    A controller class for automating product tracking and price updates 
+    between Trendyol and Hepsiburada, with MySQL storage and pandas-based analysis.
+
+    Responsibilities:
+    - Fetch and store product listings from Trendyol API
+    - Update product prices on Trendyol
+    - Monitor update statuses using batch IDs
+    - Load historical data from MySQL into pandas DataFrames
+    - Match and merge product data between Trendyol and Hepsiburada
+    """
     def __init__(self) -> None:
+        """
+        Initializes the TrendyolPriceController by:
+        - Loading environment variables from .env
+        - Setting up API headers
+        - Establishing a MySQL database connection
+        - Preparing an SQL query for inserting product data
+        """
         load_dotenv()  # Load credentials from .env
         
         self.api_key: str = os.getenv("API_KEY")
@@ -39,12 +57,26 @@ class TrendyolPriceController:
         """
 
     def get_turkey_time(self) -> str:
-        """Returns current time in Turkey timezone as string"""
+        """
+        Returns the current timestamp as a string in Europe/Istanbul timezone.
+
+        Returns:
+            str: Timestamp formatted as '%Y-%m-%d %H:%M:%S'
+        """
         turkey_tz = pytz.timezone("Europe/Istanbul")
         return datetime.now(turkey_tz).strftime('%Y-%m-%d %H:%M:%S')
 
     def fetch_all_products(self) -> List[Dict]:
-        """Fetch all products from Trendyol API with pagination"""
+        """
+        Fetches all active, non-archived products from the Trendyol API 
+        using pagination.
+
+        Returns:
+            List[Dict]: A list of product dictionaries with attributes 
+                        like barcode, title, salePrice, etc.
+        Raises:
+            Exception: If the initial API request fails.
+        """
         products: List[Dict] = []
         current_page = 0
         url = f"https://apigw.trendyol.com/integration/product/sellers/{self.seller_id}/products?page={current_page}&size={self.page_size}&archived=false&onSale=true"
@@ -69,8 +101,15 @@ class TrendyolPriceController:
 
         return products
 
+
     def store_products(self, products: List[Dict]) -> None:
-        """Insert products into MySQL with Turkish timestamp"""
+        """
+        Inserts a list of product dictionaries into the MySQL `priceTracking` table
+        with Turkish timezone timestamps.
+
+        Args:
+            products (List[Dict]): List of Trendyol product dictionaries
+        """
         print(f"\n✅ Inserting {len(products)} products into the database...\n")
 
         for product in products:
@@ -88,7 +127,15 @@ class TrendyolPriceController:
 
     def update_product_price(self, barcode: str, sale_price: float, list_price: float) -> tuple[str, bool]:
         """
-        Send a price update to Trendyol. Returns (barcode, salePrice, batch_id, success).
+        Sends a price update request to the Trendyol API for a single product.
+
+        Args:
+            barcode (str): The product's barcode.
+            sale_price (float): New sale price to update.
+            list_price (float): New list price to update.
+
+        Returns:
+            tuple[str, bool]: (batch_id, success status)
         """
         data = {
             "items": [
@@ -110,9 +157,16 @@ class TrendyolPriceController:
         else:
             return "", False
         
+
     def check_batch_status(self, batch_id: str) -> bool:
         """
-        Check the status of a price update batch. Returns True if all items are successful.
+        Checks the status of a submitted price update batch via Trendyol's API.
+
+        Args:
+            batch_id (str): The ID returned from a price update request.
+
+        Returns:
+            bool: True if all updates succeeded, False otherwise.
         """
 
         url = f"https://apigw.trendyol.com/integration/product/sellers/{self.seller_id}/products/batch-requests/{{batch_id}}"
@@ -138,12 +192,31 @@ class TrendyolPriceController:
             return False
         
     def loadDF(self) -> DataFrame:
-        """Load data from MySQL into a DataFrame"""
+        """
+        Loads all entries from the MySQL `priceTracking` table into a pandas DataFrame.
+
+        Returns:
+            pandas.DataFrame: The full price tracking table
+        """
+        
         query = "SELECT * FROM priceTracking"
         df = pd.read_sql(query, self.conn)
         return df
 
-    def matchingProducts(self, dfTrendyol: str, dfHepsiburada:str) -> DataFrame: 
+    def matchingProducts(self, dfTrendyol: DataFrame, dfHepsiburada: DataFrame) -> DataFrame:
+        """
+        Matches products between Trendyol and Hepsiburada DataFrames using 
+        various identifiers (barcode, title, etc.). Merges results into a 
+        unified DataFrame with common structure.
+
+        Args:
+            dfTrendyol (DataFrame): DataFrame containing Trendyol product data.
+            dfHepsiburada (DataFrame): DataFrame containing Hepsiburada product data.
+
+        Returns:
+            DataFrame: A new merged DataFrame with columns:
+                       ["stockID", "HBID", "productName", "price", "stock"]
+        """
         # Create empty DataFrame with desired columns
         new_df = pd.DataFrame(columns=["stockID", "HBID", "productName", "price", "stock"])
         hepsi_matched = set()
@@ -195,16 +268,46 @@ class TrendyolPriceController:
         
         return new_df
         
+    def get_price_category(self, barcode: str, new_price: float) -> str:
+        """
+        Determines which lowest-price category (1-week, 2-week, or 1-month) 
+        the given price belongs to based on historical data.
+
+        Args:
+            barcode (str): Product's barcode.
+            new_price (float): New price to evaluate.
+
+        Returns:
+            str: One of "1-week-low", "2-week-low", "1-month-low", or "none".
+        """
+        week_low = self.get_min_price_last_days(barcode, 7)
+        two_week_low = self.get_min_price_last_days(barcode, 14)
+        month_low = self.get_min_price_last_days(barcode, 30)
+
+        if new_price <= week_low:
+            return "1-week-low"
+        elif new_price <= two_week_low:
+            return "2-week-low"
+        elif new_price <= month_low:
+            return "1-month-low"
+        else:
+            return "none"
+    
+
     
 
     def close(self) -> None:
-        """Close DB connection cleanly"""
+        """
+        Closes the MySQL connection and cursor gracefully.
+        """
         self.cursor.close()
         self.conn.close()
 
-
     def run(self) -> None:
-        """Main entrypoint to run the entire process"""
+        """
+        Main entrypoint to fetch products from Trendyol and store them in MySQL.
+        Automatically closes the connection after completion.
+        """
         try:
             products = self.fetch_all_products()
             self.store_products(products)
