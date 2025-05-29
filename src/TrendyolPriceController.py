@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 import json
 import pandas as pd
 from pandas import DataFrame
+from zeep import Client
 
 class TrendyolPriceController:
     """
@@ -36,7 +37,9 @@ class TrendyolPriceController:
         self.mysql_user: str = os.getenv("MYSQL_USER")
         self.mysql_password: str = os.getenv("MYSQL_PASSWORD")
         self.mysql_database: str = os.getenv("MYSQL_DATABASE")
+        self.uye_kodu: str = os.getenv("UYE_KODU")
         self.page_size: int = 200
+        
 
         self.headers: Dict[str, str] = {
             "Content-Type": "application/json",
@@ -119,11 +122,35 @@ class TrendyolPriceController:
             created_at = self.get_turkey_time()
 
             self.cursor.execute(self.insert_query, (barcode, title, price, created_at))
-            print(f"📦 {barcode} | {title} | {price} TL")
 
         self.conn.commit()
         print("\n✅ All products inserted successfully.\n")
 
+
+    def store_fake_data(self, products: List[Dict]) -> None:
+        """
+        Inserts a list of product dictionaries into the MySQL `priceTracking` table
+        with Turkish timezone timestamps.
+
+        Args:
+            products (List[Dict]): List of Trendyol product dictionaries
+        """
+        print(f"\n✅ Inserting {len(products)} products into the database...\n")
+
+        for product in products:
+            barcode = product.get("barcode")
+            title = product.get("title")
+            price = product.get("salePrice")
+            # created_at = self.get_turkey_time()
+            for i in range(1, 31):
+                created_at = f"2025-04-{i} 00:00:01"
+                self.cursor.execute(self.insert_query, (barcode, title, price, created_at))
+
+            # self.cursor.execute(self.insert_query, (barcode, title, price, created_at))
+            # print(f"📦 {barcode} | {title} | {price} TL")
+
+        self.conn.commit()
+        print("\n✅ All products inserted successfully.\n")
 
     def update_product_price(self, barcode: str, sale_price: float, list_price: float) -> tuple[str, bool]:
         """
@@ -157,6 +184,62 @@ class TrendyolPriceController:
         else:
             return "", False
         
+    def fetch_data_by_range(self, days: int) -> DataFrame:
+        """
+        Fetches data from the MySQL `priceTracking` table for the last `days` days.
+
+        Args:
+            days (int): Number of days to look back.
+
+        Returns:
+            pandas.DataFrame: DataFrame containing the filtered data.
+        """
+
+        query = f"""
+            SELECT * FROM priceTracking
+            WHERE created_at >= CURDATE() - INTERVAL {days-1} DAY
+            AND created_at < CURDATE() + INTERVAL 1 DAY;
+        """
+
+        self.cursor.execute(query)
+        rows = self.cursor.fetchall()
+        df = pd.DataFrame(columns=["id", "barcode", "title", "price", "created_at"])
+
+        for row in rows:
+            df.loc[len(df)] = [row[0], row[1], row[2], row[3], row[4]]
+
+        return df
+    
+    def fetch_data_by_month_year(self, month: int, year: int) -> DataFrame:
+        """
+        Fetches data from the MySQL `priceTracking` table for a specific month and year.
+
+        Args:
+            month (int): Month to filter.
+            year (int): Year to filter.
+
+        Returns:
+            pandas.DataFrame: DataFrame containing the filtered data.
+        """
+
+        query = f"""
+            SELECT * FROM priceTracking
+            WHERE MONTH(created_at) = {month} AND YEAR(created_at) = {year};
+        """
+
+        self.cursor.execute(query)
+        rows = self.cursor.fetchall()
+        if rows == []:
+            raise Exception(f"No data found for {month}/{year}")
+            return None
+        
+        df = pd.DataFrame(columns=["id", "barcode", "title", "price", "created_at"])
+
+        for row in rows:
+            df.loc[len(df)] = [row[0], row[1], row[2], row[3], row[4]]
+
+        return df
+
 
     def check_batch_status(self, batch_id: str) -> bool:
         """
@@ -293,9 +376,92 @@ class TrendyolPriceController:
         else:
             return "none"
     
+    def ticimax_siparis(self) -> List[int]:
+        """
+        Fetches order IDs from the Bey Organik WSDL service.
+        
+        Returns:
+            List[int]: A list of order IDs.
+        """
 
+        WSDL_URL = "https://www.beyorganik.com/Servis/SiparisServis.svc?wsdl"
+
+        client = Client(WSDL_URL)
+
+        web_siparis_filtre = {
+            "EntegrasyonAktarildi": -1,
+            "EntegrasyonParams": {
+                "AlanDeger": "",
+                "Deger": "",
+                "EntegrasyonKodu": "",
+                "EntegrasyonParamsAktif": False,
+                "TabloAlan": "",
+                "Tanim": ""
+            },
+            "IptalEdilmisUrunler": False,
+            "FaturaNo": "",
+            "OdemeDurumu": 1,
+            "OdemeTipi": -1,
+            # TODO: different type siparis status filter and should be removed
+            # "SiparisDurumu": -1,  # filtreleme yok
+            "SiparisID": -1,
+            "SiparisKaynagi": "",
+            "SiparisKodu": "",
+            "StrSiparisDurumu": "Siparişiniz Alındı",
+            "TedarikciID": -1,
+            "UyeID": -1,
+            "SiparisNo": "",
+            "UyeTelefon": ""
+        }
+
+        web_sayfalama = {
+            "BaslangicIndex": 0,
+            "KayitSayisi": 1000,
+            "SiralamaDegeri": "SiparisTarihi",
+            "SiralamaYonu": "Asc"
+        }
+
+        result = client.service.SelectSiparis(self.uye_kodu, web_siparis_filtre, web_sayfalama)
+        siparisList = []
+        count = 0
+        for siparis in result:
+            siparisList.append(siparis.ID)
+            count += 1
+        print(f"Toplam {count} sipariş bulundu.")
+
+        return siparisList
     
+    def ticimax_urun_siparis(self, siparisList: List[int]) -> Dict:
+        """
+        Fetches product details for a list of order IDs from the Bey Organik WSDL service.
+        Args:
+            siparisList (List[int]): List of order IDs to fetch products for.
+        Returns:
+            Dict: A dictionary mapping product barcodes to a list containing 
+                  quantity and product name.
+        """
 
+        WSDL_URL = "https://www.beyorganik.com/Servis/SiparisServis.svc?wsdl"
+        client = Client(WSDL_URL)
+
+        tum_urunler = {}
+
+        for siparis_id in siparisList:
+            siparis_id = int(siparis_id) 
+            try:
+                urunler = client.service.SelectSiparisUrun(self.uye_kodu, siparis_id, False)
+
+                for urun in urunler:
+                    if urun.Barkod not in tum_urunler.keys():
+                        tum_urunler[urun.Barkod] = [int(urun.Adet), urun.UrunAdi]
+                    else:
+                        tum_urunler[urun.Barkod][0] += int(urun.Adet)
+
+            except Exception as e:
+                print(f"Hata - Sipariş ID: {siparis_id} → {e}")
+
+        return tum_urunler
+    
     def close(self) -> None:
         """
         Closes the MySQL connection and cursor gracefully.
